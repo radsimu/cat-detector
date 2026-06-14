@@ -66,6 +66,10 @@
     #settings-feedback { margin-top: 0.5rem; font-size: 0.85rem; }
     #settings-feedback.ok { color: #28a745; }
     #settings-feedback.err { color: #dc3545; }
+    #test-sprinkler-feedback .sprinkler-log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; max-height: 240px; overflow-y: auto; background: #f6f8fa; border: 1px solid #ddd; border-radius: 4px; padding: 6px 10px; }
+    #test-sprinkler-feedback .sprinkler-log > div { padding: 1px 0; color: #444; }
+    #test-sprinkler-feedback .sprinkler-log > div.ok { color: #28a745; font-weight: 600; }
+    #test-sprinkler-feedback .sprinkler-log > div.err { color: #dc3545; font-weight: 600; }
     .status-pill { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
     .status-connected { background: #d4edda; color: #155724; }
     .status-retrying { background: #fff3cd; color: #856404; }
@@ -556,7 +560,6 @@
   }
 
   async function deleteDetection(id) {
-    if (!confirm('Delete this detection? The frame file will be removed permanently.')) return;
     await fetch(`/api/detections/${id}`, { method: 'DELETE' });
     const card = document.getElementById(`card-${id}`);
     if (card) card.remove();
@@ -890,22 +893,46 @@
     const btn = document.getElementById('btn-test-sprinkler');
     const feedback = document.getElementById('test-sprinkler-feedback');
     btn.disabled = true;
-    feedback.textContent = 'Firing real-trigger path (open → wait → close)...';
     feedback.className = '';
+    feedback.innerHTML = '<div class="sprinkler-log"></div>';
+    const log = feedback.querySelector('.sprinkler-log');
+    const append = (text, cls) => {
+      const row = document.createElement('div');
+      if (cls) row.className = cls;
+      row.textContent = text;
+      log.appendChild(row);
+    };
+    append('Starting sprinkler test...');
     try {
       const res = await fetch('/api/settings/test-sprinkler', { method: 'POST' });
-      const data = await res.json();
-      if (data.ok) {
-        feedback.textContent = `✓ Sprinkler test OK (open + close confirmed, duration ${data.duration_seconds}s)`;
-        feedback.className = 'ok';
-      } else {
-        const where = data.stage ? ` [${data.stage}]` : '';
-        feedback.textContent = `✗${where} ${data.error || JSON.stringify(data)}`;
-        feedback.className = 'err';
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const chunks = buf.split('\n\n');
+        buf = chunks.pop();
+        for (const chunk of chunks) {
+          const line = chunk.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const ev = JSON.parse(line.slice(6));
+          if (ev.event === 'log') {
+            append(ev.message);
+          } else if (ev.event === 'done') {
+            if (ev.ok) {
+              append(`✓ Sprinkler test OK — actual sprinkle time: ${ev.sprinkle_ms} ms (configured dwell: ${Math.round(ev.duration_seconds * 1000)} ms)`, 'ok');
+            } else {
+              const where = ev.stage ? ` [${ev.stage}]` : '';
+              append(`✗${where} ${ev.error || JSON.stringify(ev)}`, 'err');
+            }
+          }
+        }
       }
     } catch (e) {
-      feedback.textContent = '✗ ' + e.message;
-      feedback.className = 'err';
+      append('✗ ' + e.message, 'err');
     } finally {
       btn.disabled = false;
     }

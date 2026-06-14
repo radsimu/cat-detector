@@ -88,6 +88,27 @@ async def get_valve_state_info() -> dict[str, Any] | None:
         return None
 
 
+async def refresh_entity() -> bool:
+    """Force HA to re-poll the configured valve entity via the
+    homeassistant.update_entity service. Use when the entity is stuck at
+    'unavailable' or its last_reported is suspiciously stale — the
+    SmartThings c2c integration sometimes desyncs and a refresh nudges
+    HA to reach out to the cloud again. Best-effort; doesn't raise."""
+    if not is_configured():
+        return False
+    url = f"{_base()}/api/services/homeassistant/update_entity"
+    body = {"entity_id": settings.homeassistant_valve_entity}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json=body, headers=_headers())
+        resp.raise_for_status()
+        logger.info("HA: forced refresh of %s", settings.homeassistant_valve_entity)
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning("HA refresh_entity failed: %s", exc)
+        return False
+
+
 async def notify(message: str, title: str = "Cat detector alert") -> bool:
     """Send a notification via HA. Uses settings.homeassistant_notify_service
     if configured (e.g. 'notify.mobile_app_radu_phone'); otherwise falls

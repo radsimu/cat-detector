@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta
+from typing import AsyncGenerator
 
 import cv2
 import numpy as np
@@ -27,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 _last_webhook_time: datetime | None = None
 _consecutive_triggers: int = 0  # frames in a row with a qualifying detection
+
+# Sprinkler-trigger rate-limit alerting. If we fire too many times in a short
+# window, something is wrong (loop / sensor / false-positive cluster). Alert
+# the user; don't suppress firing (a real cat must still be deterred).
+from collections import deque
+_TRIGGER_FREQ_COUNT = 5
+_TRIGGER_FREQ_WINDOW_S = 1800   # 30 min
+_TRIGGER_FREQ_COOLDOWN_S = 3600  # notify at most once per hour
+_recent_triggers: deque[float] = deque()
+_last_freq_alert_at: float = 0.0
+
+# Camera-offline alerting. consecutive_failures is tracked in run_camera_loop;
+# when it crosses this threshold we notify (rate-limited) so a transient blip
+# doesn't spam the phone.
+_CAMERA_OFFLINE_FAILURES = 5
+_CAMERA_OFFLINE_COOLDOWN_S = 600  # 10 min between camera-offline notifications
+_last_camera_alert_at: float = 0.0
+_camera_was_offline: bool = False  # tracks edge for "back online" notify
 
 # Persistent camera capture — kept open to avoid repeated open/close cycles
 # which cause the Mac camera indicator to flash and reset auto-exposure.
@@ -246,6 +266,26 @@ async def _process_frame(frame: np.ndarray) -> None:
             _last_webhook_time = datetime.utcnow()
             _consecutive_triggers = 0
             asyncio.create_task(_delayed_sprinkler_off(detection_id))
+            await _check_trigger_rate()
+
+
+async def _check_trigger_rate() -> None:
+    """Track recent trigger timestamps. If we fire too often in the rolling
+    window, notify the user — likely a false-positive cluster or runaway
+    detection. We still fire (don't suppress) so a real cat is deterred."""
+    global _last_freq_alert_at
+    now = time.time()
+    _recent_triggers.append(now)
+    while _recent_triggers and now - _recent_triggers[0] > _TRIGGER_FREQ_WINDOW_S:
+        _recent_triggers.popleft()
+    if (len(_recent_triggers) >= _TRIGGER_FREQ_COUNT
+            and now - _last_freq_alert_at > _TRIGGER_FREQ_COOLDOWN_S):
+        await homeassistant.notify(
+            f"Sprinkler fired {len(_recent_triggers)} times in last "
+            f"{_TRIGGER_FREQ_WINDOW_S // 60} min — likely false-positive cluster or bug.",
+            title="Cat detector: triggering too often",
+        )
+        _last_freq_alert_at = now
 
 
 async def _open_sprinkler(detection_id: int, result) -> bool:
@@ -300,6 +340,10 @@ async def _open_sprinkler_with_retry(detection_id: int, result, attempts: int = 
             "Valve open attempt %d unconfirmed (state=%s, last_reported=%s, baseline=%s)",
             attempt, last_state, last_reported, baseline_reported,
         )
+        # If HA marked the entity unavailable, the c2c integration likely
+        # desynced — force a refresh before the next attempt.
+        if last_state == "unavailable":
+            await homeassistant.refresh_entity()
         if attempt < attempts:
             await asyncio.sleep(delay)
             delay *= 2
@@ -363,6 +407,8 @@ async def _close_sprinkler_with_retry(detection_id: int, attempts: int = 4) -> b
             "Valve close attempt %d unconfirmed (state=%s, last_reported=%s, baseline=%s)",
             attempt, last_state, last_reported, baseline_reported,
         )
+        if last_state == "unavailable":
+            await homeassistant.refresh_entity()
         if attempt < attempts:
             await asyncio.sleep(delay)
             delay *= 2
@@ -391,16 +437,41 @@ async def valve_watchdog_loop() -> None:
         settings.valve_max_open_seconds,
     )
     open_since: float | None = None
+    unavailable_since: float | None = None
+    last_refresh_at: float = 0.0
+    last_unavail_notify_at: float = 0.0
     last_notify_at: float = 0.0
     while True:
         try:
             await asyncio.sleep(2.0)
             state = await homeassistant.get_valve_state()
+            now = asyncio.get_event_loop().time()
+
+            # Self-heal: if HA shows entity unavailable for long, the c2c
+            # integration likely desynced (entity orphaned, refresh token
+            # expired, etc). Force-refresh every 60s while unavailable;
+            # if still unavailable after 5min, notify the user once per hour.
+            if state == "unavailable":
+                if unavailable_since is None:
+                    unavailable_since = now
+                if now - last_refresh_at > 60.0:
+                    await homeassistant.refresh_entity()
+                    last_refresh_at = now
+                if (now - unavailable_since > 300.0
+                        and now - last_unavail_notify_at > 3600.0):
+                    await homeassistant.notify(
+                        f"Valve entity unavailable for {(now - unavailable_since)/60:.0f} min — "
+                        "SmartThings integration may need reauthentication.",
+                        title="Cat detector: valve integration desynced",
+                    )
+                    last_unavail_notify_at = now
+            else:
+                unavailable_since = None
+
             if state != "open":
                 open_since = None
                 continue
 
-            now = asyncio.get_event_loop().time()
             if open_since is None:
                 open_since = now
                 continue
@@ -430,32 +501,118 @@ async def valve_watchdog_loop() -> None:
             await asyncio.sleep(2.0)
 
 
-async def fire_test_trigger() -> dict:
-    """Run the exact same open/sleep/close path that a real cat detection
-    would, just without persisting a detection record or starting a
-    recording. Lets the operator verify the full sprinkler chain works
-    end-to-end (state-verified open, configured duration, state-verified
-    close) from the Settings UI."""
-    if not homeassistant.is_configured():
-        return {"ok": False, "error": "Home Assistant not configured (url + token + valve_entity all required)"}
+async def fire_test_trigger() -> AsyncGenerator[dict, None]:
+    """Async generator yielding step events for the test-sprinkler flow.
+    The UI consumes this as a server-sent event stream so the operator can
+    see exactly what the system is doing and waiting for, and gets a real
+    measured sprinkle duration (time between confirmed-open and
+    confirmed-close) on success.
 
+    Yields dicts shaped as either:
+      {"event": "log", "message": "..."}   — progress line
+      {"event": "done", "ok": bool, ...}   — final result, ends the stream
+    """
+    if not homeassistant.is_configured():
+        yield {"event": "done", "ok": False,
+               "error": "Home Assistant not configured (url + token + valve_entity all required)"}
+        return
+
+    yield {"event": "log", "message": "Checking HA connection..."}
     diag = await homeassistant.test_connection()
     if not diag.get("ok"):
-        return diag
+        yield {"event": "done", "ok": False, "stage": "connect",
+               "error": diag.get("error", "HA connection failed"), "ha": diag}
+        return
+    yield {"event": "log",
+           "message": f"HA OK — entity {diag.get('entity_id')} state={diag.get('state')}"}
 
-    open_ok = await _open_sprinkler_with_retry(detection_id=0, result=None)
-    if not open_ok:
-        return {"ok": False, "stage": "open", "error": "Valve did not reach 'open' state after retries", **diag}
+    # If the entity is unavailable, the SmartThings integration may have
+    # desynced. Force a refresh before giving up on retries.
+    if diag.get("state") == "unavailable":
+        yield {"event": "log",
+               "message": "Entity unavailable — calling homeassistant.update_entity to nudge integration..."}
+        await homeassistant.refresh_entity()
+        await asyncio.sleep(2.0)
+        info = await homeassistant.get_valve_state_info()
+        new_state = info.get("state") if info else None
+        yield {"event": "log",
+               "message": f"After refresh: state={new_state}"}
 
-    await asyncio.sleep(settings.sprinkler_duration_seconds)
-    close_ok = await _close_sprinkler_with_retry(detection_id=0)
-    return {
-        "ok": close_ok,
-        "open_ok": open_ok,
-        "close_ok": close_ok,
-        "duration_seconds": settings.sprinkler_duration_seconds,
-        **diag,
-    }
+    # Mirror the production trigger path: start a recording right now so the
+    # pre-roll captures the moment the test starts and the post-roll captures
+    # the dwell + close. detection_id=None → filename has "manual" suffix and
+    # the recordings table row has a null FK (column is nullable).
+    from cat_detector.recording import trigger_recording
+    asyncio.create_task(trigger_recording(None))
+    yield {"event": "log", "message": "Recording started (will appear under Recordings)"}
+
+    # ---- SEQUENCE: fire-and-forget open + dwell + fire-and-forget close --
+    # Waiting for per-command confirmation via the SmartThings cloud adds
+    # ~1.5s RTT on each side, blowing up real water-on time. Fire both
+    # commands back-to-back so the device-side gap matches the configured
+    # dwell, then verify *after* the sequence that the valve actually
+    # transitioned (state ended 'closed' with last_changed advanced past
+    # baseline). The independent watchdog catches the stuck-open case.
+    info0 = await homeassistant.get_valve_state_info() or {}
+    baseline_changed = info0.get("last_changed")
+    yield {"event": "log",
+           "message": f"Baseline state={info0.get('state')}, last_changed={baseline_changed}"}
+
+    open_send_t = time.monotonic()
+    yield {"event": "log", "message": "Sending valve.open_valve (no wait)..."}
+    try:
+        await _open_sprinkler(0, None)
+    except Exception as exc:
+        yield {"event": "log", "message": f"Open call raised: {exc}"}
+
+    dwell_s = settings.sprinkler_duration_seconds
+    yield {"event": "log", "message": f"Dwell — {int(dwell_s * 1000)} ms..."}
+    await asyncio.sleep(dwell_s)
+
+    close_send_t = time.monotonic()
+    yield {"event": "log", "message": "Sending valve.close_valve (no wait)..."}
+    try:
+        await _close_sprinkler(0)
+    except Exception as exc:
+        yield {"event": "log", "message": f"Close call raised: {exc}"}
+
+    command_gap_ms = int((close_send_t - open_send_t) * 1000)
+    yield {"event": "log",
+           "message": f"Commands sent {command_gap_ms} ms apart. Verifying cycle (up to 10s)..."}
+
+    # ---- VERIFY -----------------------------------------------------------
+    # Require state=='closed' AND last_changed advanced past baseline. The
+    # last_changed timestamp only moves on real state transitions, so a
+    # stuck-closed entity won't false-confirm.
+    deadline = time.monotonic() + 10.0
+    last_state: str | None = None
+    last_changed = baseline_changed
+    last_reported = info0.get("last_reported") or info0.get("last_updated")
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.5)
+        info = await homeassistant.get_valve_state_info()
+        if info is None:
+            continue
+        last_state = info.get("state")
+        last_changed = info.get("last_changed")
+        last_reported = info.get("last_reported") or info.get("last_updated")
+        if last_state == "closed" and last_changed != baseline_changed:
+            yield {"event": "log",
+                   "message": f"✓ Cycle confirmed — state=closed, last_changed={last_changed} (advanced)"}
+            yield {"event": "done", "ok": True, "sprinkle_ms": command_gap_ms,
+                   "duration_seconds": dwell_s, "ha": diag}
+            return
+
+    yield {"event": "log",
+           "message": (f"✗ No confirmed transition. Final state={last_state}, "
+                       f"last_changed={last_changed} (unchanged), last_reported={last_reported}")}
+    if last_state == "unavailable":
+        await homeassistant.refresh_entity()
+        yield {"event": "log",
+               "message": "Forced HA refresh — integration may need reauth"}
+    yield {"event": "done", "ok": False, "stage": "verify",
+           "error": "Cycle did not confirm — no state transition observed during verification window",
+           "ha": diag, "last_state": last_state}
 
 
 async def reconcile_valve_on_startup() -> None:
@@ -488,7 +645,7 @@ async def run_camera_loop() -> None:
         settings.detection_interval_seconds,
     )
 
-    global camera_status
+    global camera_status, _last_camera_alert_at, _camera_was_offline
     consecutive_failures = 0
 
     while True:
@@ -496,12 +653,28 @@ async def run_camera_loop() -> None:
             frame = await asyncio.get_event_loop().run_in_executor(None, _grab_frame)
             if frame is not None:
                 camera_status = "connected"
+                if _camera_was_offline:
+                    _camera_was_offline = False
+                    await homeassistant.notify(
+                        "Camera back online.",
+                        title="Cat detector: camera recovered",
+                    )
                 consecutive_failures = 0
                 await _process_frame(frame)
                 await asyncio.sleep(settings.detection_interval_seconds)
             else:
                 consecutive_failures += 1
                 camera_status = "retrying" if consecutive_failures < 5 else "disconnected"
+                if consecutive_failures == _CAMERA_OFFLINE_FAILURES:
+                    now = time.time()
+                    if now - _last_camera_alert_at > _CAMERA_OFFLINE_COOLDOWN_S:
+                        _last_camera_alert_at = now
+                        _camera_was_offline = True
+                        await homeassistant.notify(
+                            f"Camera offline — {consecutive_failures} consecutive frame grabs failed. "
+                            f"Source: {settings.camera_url}",
+                            title="Cat detector: camera offline",
+                        )
                 delay = min(
                     settings.detection_interval_seconds * (2 ** consecutive_failures),
                     settings.camera_reconnect_max_delay,

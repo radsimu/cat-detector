@@ -3,12 +3,14 @@ Runtime settings API — view and edit config without a service restart.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from cat_detector.camera import fire_test_trigger
@@ -77,12 +79,22 @@ def update_settings(updates: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/test-sprinkler")
-async def test_sprinkler() -> dict[str, Any]:
-    """Fire the sprinkler exactly the way a real cat detection would —
-    state-verified open, sprinkler_duration_seconds pause, state-verified
-    close. Reuses the same code path as the real trigger so this test is
-    a faithful proxy for production behavior."""
-    return await fire_test_trigger()
+async def test_sprinkler() -> StreamingResponse:
+    """Stream Server-Sent Events as the test progresses: each step (sending
+    open, polling, confirmed, dwell, close, etc) yields a 'log' event; a
+    final 'done' event carries ok/error and the actual measured sprinkle
+    duration in milliseconds (time between confirmed open and confirmed
+    close). Reuses the same code path as a real trigger, so this is a
+    faithful proxy for production behavior."""
+    async def stream():
+        async for event in fire_test_trigger():
+            yield f"data: {json.dumps(event)}\n\n"
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        # Disable proxy buffering so events flush immediately
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/restart")
