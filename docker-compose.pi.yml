@@ -1,0 +1,48 @@
+# Compose file for the Raspberry Pi 5 deployment. Lives next to HA's
+# /opt/homeassistant/docker-compose.yml. Bind mounts persist the SQLite DB,
+# captured frames, recordings, and the ultralytics weights cache so a
+# container rebuild doesn't lose detection history or re-download the model.
+services:
+  cat-detector:
+    build: .
+    container_name: cat-detector
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # The camera and HA are both on the host LAN — the bridged container
+      # network can reach them via the Pi's gateway.
+      - CAMERA_URL=${CAMERA_URL}
+      # Hailo-10H AI HAT+ inference path (fast). Falls back to ultralytics
+      # CPU path if DETECTION_BACKEND is unset or "ultralytics".
+      - DETECTION_BACKEND=hailo
+      - DETECTION_HEF_PATH=/app/data/hailo/yolov8x.hef
+      # Kept for the ultralytics fallback path. Absolute so the persistent
+      # weights file is found regardless of ultralytics' CWD behaviour.
+      - DETECTION_MODEL=/app/data/ultralytics/yolov8x.pt
+      - FRAMES_DIR=/app/data/frames
+      - RECORDINGS_DIR=/app/data/recordings
+      - DATABASE_URL=sqlite:////app/data/cat_detector.db
+    devices:
+      # PCIe device node for the Hailo-10H. Kernel driver runs on the host;
+      # the container only needs userspace access to the chardev.
+      - "/dev/hailo0:/dev/hailo0"
+    volumes:
+      # Persistent state. Everything that should survive a rebuild lives here.
+      - ./data:/app/data
+      # Runtime overrides written by the Settings UI
+      - ./settings_overrides.json:/app/settings_overrides.json
+
+  # Sidecar that monitors the cat-detector Docker healthcheck. When the
+  # container is marked unhealthy (HTTP probe fails for >=90s), this
+  # restarts it. Catches frozen-event-loop cases that restart:unless-stopped
+  # misses because the process didn't actually exit.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: cat-detector-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

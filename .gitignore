@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.venv2/
+.venv-test/
+venv/
+
+# Environment
+.env
+
+# Data
+data/
+*.db
+*.db-journal
+
+# YOLO weights (downloaded automatically)
+*.pt
+*.onnx
+
+# Claude Code — keep skills, agents, hooks, and settings; ignore caches
+.claude/*
+!.claude/skills/
+!.claude/agents/
+!.claude/hooks/
+!.claude/settings.json
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store
+cat_detector.db.bak*
+cat_detector.db.*bak
+settings_overrides.json

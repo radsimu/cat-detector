@@ -1,0 +1,35 @@
+# Caches & local envs
+.venv*
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Data we don't bake into the image (mounted at runtime)
+cat_detector.db
+cat_detector.db.*
+data/
+yolov8*.pt
+
+# Dev / docs / tests / infra
+tests/
+docs/
+deliverables/
+stories/
+infra/
+scripts/
+.git/
+.github/
+*.md
+azure-pipelines.yml
+LICENSE
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Local runtime config — gets bind-mounted instead of baked in
+settings_overrides.json
+.env

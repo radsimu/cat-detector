@@ -1,0 +1,146 @@
+# Cat Detector — Azure DevOps Pipeline
+# Runs lint, test, build on PR; adds staging deploy on push to main.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  pythonVersion: "3.11"
+
+stages:
+  # ──────────────────────────────────────────────
+  # Stage 1: Lint
+  # ──────────────────────────────────────────────
+  - stage: Lint
+    displayName: "Lint"
+    jobs:
+      - job: Ruff
+        displayName: "Ruff lint check"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: "Use Python $(pythonVersion)"
+
+          - script: pip install ruff
+            displayName: "Install ruff"
+
+          - script: ruff check src/ tests/
+            displayName: "Run ruff"
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Test
+  # ──────────────────────────────────────────────
+  - stage: Test
+    displayName: "Test"
+    dependsOn: Lint
+    jobs:
+      - job: Pytest
+        displayName: "Unit tests"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: "Use Python $(pythonVersion)"
+
+          - script: pip install -e ".[dev]" pytest-cov
+            displayName: "Install dependencies"
+
+          - script: >
+              pytest tests/
+              --junitxml=test-results.xml
+              --cov=cat_detector
+              --cov-report=xml:coverage.xml
+              --cov-report=term
+            displayName: "Run tests with coverage"
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: test-results.xml
+              testRunTitle: "Cat Detector — Unit Tests"
+            displayName: "Publish test results"
+
+          - task: PublishCodeCoverageResults@2
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: coverage.xml
+            displayName: "Publish coverage report"
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Build
+  # ──────────────────────────────────────────────
+  - stage: Build
+    displayName: "Build"
+    dependsOn: Test
+    jobs:
+      - job: BuildWheel
+        displayName: "Build wheel artifact"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: "Use Python $(pythonVersion)"
+
+          - script: pip install build
+            displayName: "Install build tools"
+
+          - script: python -m build
+            displayName: "Build wheel"
+
+          # Verify the package is importable
+          - script: |
+              pip install dist/*.whl
+              python -c "from cat_detector.main import app; print('Build verification OK')"
+            displayName: "Verify build"
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: dist/
+              artifactName: wheel
+            displayName: "Publish wheel artifact"
+
+  # ──────────────────────────────────────────────
+  # Stage 4: Deploy to Staging (main branch only)
+  # ──────────────────────────────────────────────
+  - stage: DeployStaging
+    displayName: "Deploy to Staging"
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: Staging
+        displayName: "Deploy to staging environment"
+        pool:
+          vmImage: ubuntu-latest
+        # Configure the 'staging' environment in ADO with a manual approval gate.
+        # Project Settings → Environments → staging → Approvals and checks → Add approver.
+        environment: staging
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: wheel
+                  displayName: "Download wheel artifact"
+
+                # TODO: Replace with real deployment steps (e.g. SSH, Container App, systemd).
+                - script: |
+                    echo "Deploying cat-detector to staging..."
+                    echo "Artifact: $(Pipeline.Workspace)/wheel/"
+                    ls -la $(Pipeline.Workspace)/wheel/
+                    echo "Deployment placeholder complete. Configure real deployment here."
+                  displayName: "Deploy (placeholder)"

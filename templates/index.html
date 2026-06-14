@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cat Detector</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
+    header { background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
+    header h1 { font-size: 1.4rem; }
+    #status-bar { background: #16213e; color: #aaa; padding: 0.4rem 2rem; font-size: 0.85rem; display: flex; gap: 2rem; }
+    #status-bar span { color: #fff; }
+    main { max-width: 1200px; margin: 1.5rem auto; padding: 0 1rem; }
+    .tabs { display: flex; gap: 0; margin-bottom: 1rem; border-bottom: 2px solid #ddd; }
+    .tab { padding: 0.6rem 1.5rem; cursor: pointer; font-size: 0.95rem; font-weight: 600; border: none; background: none; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+    .tab.active { color: #1a1a2e; border-bottom-color: #e94560; }
+    .tab:hover { color: #1a1a2e; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    .toolbar h2 { font-size: 1.1rem; }
+    #btn-train { background: #e94560; color: #fff; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    #btn-train:disabled { opacity: 0.5; cursor: not-allowed; }
+    #live-view { display: none; text-align: center; padding: 1rem 0; }
+    #live-view img { max-width: 100%; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+    #live-view .live-badge { display: inline-block; background: #e94560; color: #fff; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.5rem; }
+    #live-view p { color: #888; font-size: 0.85rem; margin-top: 0.5rem; }
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+    .card { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+    .card img { width: 100%; height: 180px; object-fit: cover; background: #ddd; display: block; }
+    .card-body { padding: 0.75rem; }
+    .card-meta { font-size: 0.8rem; color: #666; margin-bottom: 0.5rem; }
+    .badges { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+    .badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
+    .badge-cat { background: #d4edda; color: #155724; }
+    .badge-dog { background: #e2d9f3; color: #5a2d82; }
+    .badge-human { background: #fff3cd; color: #856404; }
+    .date-filter { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; font-size: 0.85rem; }
+    .date-filter input { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem; }
+    .date-filter button { padding: 4px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #1a1a2e; color: #fff; font-size: 0.85rem; }
+    .badge-webhook { background: #cce5ff; color: #004085; }
+    .badge-skipped { background: #f8d7da; color: #721c24; }
+    .label-btns { display: flex; gap: 0.4rem; }
+    .label-btns button { flex: 1; font-size: 0.78rem; padding: 4px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #f9f9f9; }
+    .label-btns button.active-tp { background: #28a745; color: #fff; border-color: #28a745; }
+    .label-btns button.active-fp { background: #dc3545; color: #fff; border-color: #dc3545; }
+    .label-btns button.active-fn { background: #fd7e14; color: #fff; border-color: #fd7e14; }
+    .card-actions { display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+    .card-actions button { flex: 1; font-size: 0.75rem; padding: 3px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #f9f9f9; color: #666; }
+    .card-actions .btn-delete { background: #fff; color: #dc3545; border-color: #dc3545; }
+    #btn-missed { background: #fd7e14; color: #fff; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-right: 0.5rem; }
+    #btn-missed:disabled { opacity: 0.5; cursor: not-allowed; }
+    #btn-upload { background: #6c757d; color: #fff; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-right: 0.5rem; }
+    #btn-upload:disabled { opacity: 0.5; cursor: not-allowed; }
+    #load-more { display: block; margin: 1.5rem auto; padding: 0.6rem 2rem; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    .settings-section { background: #fff; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+    .settings-section h3 { font-size: 1rem; margin-bottom: 0.75rem; color: #444; }
+    .settings-row { display: flex; align-items: center; gap: 1rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; }
+    .settings-row label { flex: 0 0 220px; font-size: 0.9rem; color: #555; font-family: monospace; }
+    .settings-row input, .settings-row select { flex: 1; padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; max-width: 400px; }
+    .settings-row .readonly-value { flex: 1; padding: 5px 8px; color: #666; font-family: monospace; font-size: 0.85rem; background: #f9f9f9; border-radius: 4px; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #btn-save-settings { margin-top: 0.75rem; background: #28a745; color: #fff; border: none; padding: 0.5rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    #btn-save-settings:disabled { opacity: 0.5; cursor: not-allowed; }
+    #btn-restart { background: #fd7e14; color: #fff; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-left: 0.5rem; }
+    #btn-test-webhook { background: #17a2b8; color: #fff; border: none; padding: 0.5rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    #btn-test-webhook:disabled { opacity: 0.5; cursor: not-allowed; }
+    #settings-feedback { margin-top: 0.5rem; font-size: 0.85rem; }
+    #settings-feedback.ok { color: #28a745; }
+    #settings-feedback.err { color: #dc3545; }
+    .status-pill { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+    .status-connected { background: #d4edda; color: #155724; }
+    .status-retrying { background: #fff3cd; color: #856404; }
+    .status-disconnected { background: #f8d7da; color: #721c24; }
+    .status-unknown { background: #e9ecef; color: #495057; }
+    #recordings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+    .rec-card { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 0.75rem; }
+    .rec-card video { width: 100%; border-radius: 4px; background: #000; }
+    .rec-card-meta { font-size: 0.85rem; color: #666; margin: 0.5rem 0; display: flex; justify-content: space-between; }
+    .rec-delete { background: #dc3545; color: #fff; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.78rem; }
+    .empty { text-align: center; color: #999; padding: 3rem; grid-column: 1/-1; }
+    /* Annotation modal */
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1000; justify-content: center; align-items: center; padding: 1rem; }
+    .modal-overlay.open { display: flex; }
+    .modal-box { background: #fff; border-radius: 8px; padding: 1.25rem; max-width: 95vw; max-height: 95vh; display: flex; flex-direction: column; }
+    .modal-box h3 { margin-bottom: 0.5rem; font-size: 1.05rem; }
+    .modal-box p.hint { font-size: 0.85rem; color: #666; margin-bottom: 0.75rem; }
+    .annot-canvas-wrap { position: relative; display: inline-block; line-height: 0; max-width: 100%; overflow: hidden; }
+    .annot-canvas-wrap img { max-width: 100%; max-height: 70vh; display: block; user-select: none; pointer-events: none; }
+    .annot-canvas-wrap canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
+    .modal-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; justify-content: flex-end; }
+    .modal-actions button { padding: 0.5rem 1.2rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    .modal-actions .btn-cancel { background: #e9ecef; color: #333; }
+    .modal-actions .btn-submit { background: #fd7e14; color: #fff; }
+    .modal-actions .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Image zoom modal — click any detection thumbnail */
+    #zoom-modal { cursor: zoom-out; }
+    #zoom-modal img { max-width: 95vw; max-height: 95vh; box-shadow: 0 4px 24px rgba(0,0,0,0.5); border-radius: 4px; }
+    .card img { cursor: zoom-in; }
+
+    /* ROI polygon editor */
+    .roi-canvas-wrap { position: relative; max-width: 90vw; max-height: 75vh; }
+    .roi-canvas-wrap img { display: block; max-width: 90vw; max-height: 75vh; }
+    .roi-canvas-wrap canvas { position: absolute; left: 0; top: 0; cursor: crosshair; }
+    #btn-live-missed { background: #fd7e14; color: #fff; border: none; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+<header>
+  <div>🐱</div>
+  <h1>Cat Detector</h1>
+</header>
+<div id="status-bar">
+  <div>True positives: <span id="stat-tp">—</span></div>
+  <div>False positives: <span id="stat-fp">—</span></div>
+  <div>Missed cats: <span id="stat-fn">—</span></div>
+  <div>Unlabeled: <span id="stat-ul">—</span></div>
+  <div>Training: <span id="stat-train">idle</span></div>
+</div>
+<main>
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('history')" id="tab-history">Detection History</button>
+    <button class="tab" onclick="switchTab('live')" id="tab-live">Live View</button>
+    <button class="tab" onclick="switchTab('recordings')" id="tab-recordings">Sprinkler Events</button>
+    <button class="tab" onclick="switchTab('settings')" id="tab-settings">Settings</button>
+  </div>
+
+  <div id="history-view">
+    <div class="toolbar">
+      <h2>Detection History</h2>
+      <div>
+        <input type="file" id="upload-input" accept="image/*" style="display:none" onchange="uploadImage(this.files[0])" />
+        <button id="btn-upload" onclick="document.getElementById('upload-input').click()">Upload Image</button>
+        <button id="btn-train" onclick="triggerTraining()">Trigger Fine-tuning</button>
+      </div>
+    </div>
+    <div class="date-filter">
+      <label>From:</label><input type="date" id="filter-from" />
+      <label>To:</label><input type="date" id="filter-to" />
+      <label>Show:</label>
+      <select id="filter-label" onchange="applyFilter()">
+        <option value="unlabeled" selected>Unlabeled only</option>
+        <option value="labeled">Labeled only</option>
+        <option value="all">All</option>
+      </select>
+      <button onclick="applyFilter()">Filter</button>
+      <button onclick="clearFilter()">Clear</button>
+    </div>
+    <div id="grid"></div>
+    <button id="load-more" onclick="loadMore()">Load more</button>
+  </div>
+
+  <div id="live-view">
+    <span class="live-badge">LIVE</span>
+    <div>
+      <img id="live-stream" src="" alt="Live camera feed" />
+    </div>
+    <p>Camera source: <code id="live-source"></code> &middot; Detection overlay enabled</p>
+    <button id="btn-live-missed" onclick="reportMissedCatLive()">Report Missed</button>
+    <button id="btn-webcam-test" onclick="toggleWebcamTest()" style="background:#17a2b8;color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:6px;cursor:pointer;font-size:0.9rem;margin-top:0.75rem;margin-left:0.5rem;">Test with my webcam</button>
+
+    <div id="webcam-test-panel" style="display:none;margin-top:1.25rem;padding:1rem;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.1);">
+      <h3 style="margin-bottom:0.5rem;font-size:1rem;">Webcam → server detection (debug)</h3>
+      <p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem;">
+        Streams ~1 frame/sec from your laptop webcam to the detector. Lets you
+        verify the model actually fires on cats it sees, without waiting for
+        the garden camera.
+      </p>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start;">
+        <div style="flex:1;min-width:280px;">
+          <p style="font-size:0.78rem;color:#888;margin-bottom:4px;">Webcam input</p>
+          <video id="webcam-video" autoplay playsinline muted style="width:100%;background:#000;border-radius:4px;"></video>
+        </div>
+        <div style="flex:1;min-width:280px;">
+          <p style="font-size:0.78rem;color:#888;margin-bottom:4px;">Detection result</p>
+          <img id="webcam-annotated" alt="annotated" style="width:100%;background:#000;border-radius:4px;min-height:160px;" />
+        </div>
+      </div>
+      <div id="webcam-result" style="margin-top:0.75rem;font-size:0.9rem;color:#333;font-family:monospace;"></div>
+      <canvas id="webcam-canvas" style="display:none;"></canvas>
+    </div>
+  </div>
+
+  <div id="recordings-view" style="display:none">
+    <div class="toolbar">
+      <h2>Sprinkler Events</h2>
+    </div>
+    <div id="recordings-grid"></div>
+  </div>
+
+  <div id="settings-view" style="display:none">
+    <div class="toolbar">
+      <h2>Settings</h2>
+      <div>
+        <span id="camera-status-pill" class="status-pill status-unknown">Camera: unknown</span>
+        <button id="btn-restart" onclick="restartService()">Restart Service</button>
+      </div>
+    </div>
+    <div class="settings-sections">
+      <div class="settings-section">
+        <h3>Sprinkler control test</h3>
+        <p style="font-size:0.85rem;color:#666;margin-bottom:0.5rem;">
+          Fires the sprinkler the same way a real cat detection would: state-verified
+          open via Home Assistant, configured sprinkler_duration_seconds pause,
+          state-verified close. Faithfully exercises the production trigger path.
+        </p>
+        <button id="btn-test-sprinkler" onclick="testSprinkler()" style="background:#17a2b8;color:#fff;border:none;padding:0.5rem 1.5rem;border-radius:6px;cursor:pointer;font-size:0.9rem;">Test Sprinkler</button>
+        <div id="test-sprinkler-feedback" style="margin-top:0.5rem;font-size:0.85rem;"></div>
+      </div>
+      <div class="settings-section">
+        <h3>Region of interest</h3>
+        <p style="font-size:0.85rem;color:#666;margin-bottom:0.5rem;">
+          Restrict detections to a polygon. Anything outside is ignored —
+          useful when the camera also sees a public sidewalk or neighbour's yard.
+        </p>
+        <button id="btn-edit-roi" onclick="openRoiEditor()">Edit polygon</button>
+        <button id="btn-clear-roi" onclick="clearRoi()" style="margin-left:0.5rem;background:#e9ecef;color:#333;border:none;padding:0.5rem 1.2rem;border-radius:6px;cursor:pointer;">Clear</button>
+        <span id="roi-status" style="margin-left:0.75rem;font-size:0.85rem;color:#666;"></span>
+      </div>
+      <div class="settings-section">
+        <h3>Runtime (apply immediately)</h3>
+        <div id="mutable-fields"></div>
+        <button id="btn-save-settings" onclick="saveSettings()">Save</button>
+        <div id="settings-feedback"></div>
+      </div>
+      <div class="settings-section">
+        <h3>Read-only (restart required to change via .env)</h3>
+        <div id="readonly-fields"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="annot-modal" class="modal-overlay">
+  <div class="modal-box">
+    <h3>Draw a bounding box around the missed subject</h3>
+    <p class="hint">Click and drag on the image to draw a box. Release to finish. Drag again to redraw.</p>
+    <div style="margin-bottom: 0.5rem; font-size: 0.9rem;">
+      <strong>What did the model miss?</strong>
+      <label style="margin-left: 0.75rem;"><input type="radio" name="annot-class" value="cat" checked /> Cat</label>
+      <label style="margin-left: 0.5rem;"><input type="radio" name="annot-class" value="person" /> Human</label>
+    </div>
+    <div class="annot-canvas-wrap">
+      <img id="annot-image" alt="Frame to annotate" />
+      <canvas id="annot-canvas"></canvas>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeAnnotModal()">Cancel</button>
+      <button class="btn-submit" id="annot-submit" onclick="submitAnnotation()" disabled>Submit</button>
+    </div>
+  </div>
+</div>
+
+<div id="zoom-modal" class="modal-overlay" onclick="closeZoomModal()">
+  <img id="zoom-image" alt="Zoomed detection frame" />
+</div>
+
+<div id="roi-modal" class="modal-overlay">
+  <div class="modal-box">
+    <h3>Region of interest</h3>
+    <p class="hint">Click empty area to add a vertex (need ≥3). <strong>Drag</strong> a vertex to move it. <strong>Right-click</strong> a vertex to delete it. Undo removes the last added.</p>
+    <div class="roi-canvas-wrap">
+      <img id="roi-image" alt="Camera snapshot for ROI editing" />
+      <canvas id="roi-canvas"></canvas>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeRoiModal()">Cancel</button>
+      <button class="btn-cancel" onclick="undoRoiPoint()">Undo</button>
+      <button class="btn-cancel" onclick="resetRoiPoints()">Reset</button>
+      <button class="btn-submit" id="roi-save" onclick="saveRoiPolygon()" disabled>Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let offset = 0;
+  const limit = 24;
+
+  function formatDate(iso) {
+    return new Date(iso).toLocaleString();
+  }
+
+  function cardHtml(d) {
+    const imgSrc = d.frame_path ? `/api/detections/${d.id}/frame` : 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>';
+    const tpActive = d.label === 'true_positive' ? 'active-tp' : '';
+    const fpActive = d.label === 'false_positive' ? 'active-fp' : '';
+    const fnActive = d.label === 'false_negative' ? 'active-fn' : '';
+    const webhookBadge = d.webhook_triggered
+      ? `<span class="badge badge-webhook">webhook sent</span>`
+      : `<span class="badge badge-skipped">${d.webhook_skipped_reason || 'no webhook'}</span>`;
+    return `
+      <div class="card" id="card-${d.id}">
+        <img src="${imgSrc}" alt="Detection frame" loading="lazy" onerror="this.style.display='none'" onclick="openZoomModal('${imgSrc}')" />
+        <div class="card-body">
+          <div class="card-meta">${formatDate(d.created_at)}</div>
+          <div class="badges">
+            ${d.cat_count > 0 ? `<span class="badge badge-cat">🐱 ${d.cat_count} cat${d.cat_count !== 1 ? 's' : ''} (${(d.max_cat_confidence * 100).toFixed(0)}%)</span>` : ''}
+            ${d.dog_count > 0 ? `<span class="badge badge-dog">🐕 ${d.dog_count} dog${d.dog_count !== 1 ? 's' : ''}</span>` : ''}
+            ${d.human_count > 0 ? `<span class="badge badge-human">👤 ${d.human_count} human${d.human_count !== 1 ? 's' : ''}</span>` : ''}
+            ${webhookBadge}
+          </div>
+          <div class="label-btns">
+            <button class="${tpActive}" onclick="label(${d.id}, 'true_positive')">✓ Correct</button>
+            <button class="${fpActive}" onclick="label(${d.id}, 'false_positive')">✗ Wrong</button>
+            <button class="${fnActive}" onclick="label(${d.id}, 'false_negative')">! Missed</button>
+          </div>
+          <div class="card-actions">
+            <button class="btn-delete" onclick="deleteDetection(${d.id})">Delete</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function openZoomModal(imgUrl) {
+    document.getElementById('zoom-image').src = imgUrl;
+    document.getElementById('zoom-modal').classList.add('open');
+  }
+
+  function closeZoomModal() {
+    document.getElementById('zoom-modal').classList.remove('open');
+    document.getElementById('zoom-image').src = '';
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('zoom-modal').classList.contains('open')) closeZoomModal();
+      if (document.getElementById('roi-modal').classList.contains('open')) closeRoiModal();
+    }
+  });
+
+  // ---------- ROI polygon editor ----------
+  let _roiPoints = [];           // array of normalized [x, y] in [0, 1]
+  let _roiDragIdx = null;        // index of vertex being dragged, or null
+  let _roiMouseDown = null;      // {idx, px, py} captured at mousedown
+  const _ROI_HIT_RADIUS = 12;    // px — handle hit-test radius
+
+  function _roiCanvasPos(e) {
+    const canvas = document.getElementById('roi-canvas');
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    return { px, py, nx: px / rect.width, ny: py / rect.height, w: rect.width, h: rect.height };
+  }
+
+  function _roiHitTest(px, py, w, h) {
+    for (let i = 0; i < _roiPoints.length; i++) {
+      const [x, y] = _roiPoints[i];
+      if (Math.hypot(x * w - px, y * h - py) <= _ROI_HIT_RADIUS) return i;
+    }
+    return -1;
+  }
+
+  async function openRoiEditor() {
+    _roiPoints = [];
+    _roiDragIdx = null;
+    _roiMouseDown = null;
+    const img = document.getElementById('roi-image');
+    img.src = '/api/snapshot?ts=' + Date.now();
+    img.onload = () => {
+      const canvas = document.getElementById('roi-canvas');
+      canvas.width = img.clientWidth;
+      canvas.height = img.clientHeight;
+      // Pre-load any existing polygon from settings
+      fetch('/api/settings').then(r => r.json()).then(d => {
+        const raw = d.mutable.roi_polygon;
+        if (raw) {
+          try { _roiPoints = JSON.parse(raw); } catch (e) { _roiPoints = []; }
+        }
+        drawRoi();
+        updateRoiSaveBtn();
+      });
+    };
+    img.onerror = () => alert('Could not fetch a camera snapshot — is the camera connected?');
+    document.getElementById('roi-modal').classList.add('open');
+
+    const canvas = document.getElementById('roi-canvas');
+
+    canvas.onmousedown = (e) => {
+      if (e.button !== 0) return; // left only
+      const p = _roiCanvasPos(e);
+      const hit = _roiHitTest(p.px, p.py, p.w, p.h);
+      _roiMouseDown = { idx: hit, px: p.px, py: p.py };
+      if (hit >= 0) _roiDragIdx = hit;
+    };
+
+    canvas.onmousemove = (e) => {
+      if (_roiDragIdx === null) {
+        // Hover feedback: show pointer cursor over handles, crosshair elsewhere
+        const p = _roiCanvasPos(e);
+        const hit = _roiHitTest(p.px, p.py, p.w, p.h);
+        canvas.style.cursor = hit >= 0 ? 'grab' : 'crosshair';
+        return;
+      }
+      canvas.style.cursor = 'grabbing';
+      const p = _roiCanvasPos(e);
+      const nx = Math.min(1, Math.max(0, p.nx));
+      const ny = Math.min(1, Math.max(0, p.ny));
+      _roiPoints[_roiDragIdx] = [+nx.toFixed(4), +ny.toFixed(4)];
+      drawRoi();
+    };
+
+    canvas.onmouseup = (e) => {
+      if (e.button !== 0) return;
+      const p = _roiCanvasPos(e);
+      const movedFar = _roiMouseDown
+        ? Math.hypot(p.px - _roiMouseDown.px, p.py - _roiMouseDown.py) > 4
+        : false;
+      if (_roiDragIdx !== null) {
+        _roiDragIdx = null;
+      } else if (_roiMouseDown && _roiMouseDown.idx < 0 && !movedFar) {
+        // Genuine click on empty area — add a new vertex
+        _roiPoints.push([+p.nx.toFixed(4), +p.ny.toFixed(4)]);
+        drawRoi();
+        updateRoiSaveBtn();
+      }
+      _roiMouseDown = null;
+    };
+
+    canvas.oncontextmenu = (e) => {
+      e.preventDefault();
+      const p = _roiCanvasPos(e);
+      const idx = _roiHitTest(p.px, p.py, p.w, p.h);
+      if (idx >= 0) {
+        _roiPoints.splice(idx, 1);
+        drawRoi();
+        updateRoiSaveBtn();
+      }
+    };
+  }
+
+  function closeRoiModal() {
+    document.getElementById('roi-modal').classList.remove('open');
+  }
+
+  function undoRoiPoint() {
+    _roiPoints.pop();
+    drawRoi();
+    updateRoiSaveBtn();
+  }
+
+  function resetRoiPoints() {
+    _roiPoints = [];
+    drawRoi();
+    updateRoiSaveBtn();
+  }
+
+  function updateRoiSaveBtn() {
+    document.getElementById('roi-save').disabled = _roiPoints.length < 3;
+  }
+
+  function drawRoi() {
+    const canvas = document.getElementById('roi-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (_roiPoints.length === 0) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.strokeStyle = '#ffd400';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(255, 212, 0, 0.18)';
+    ctx.beginPath();
+    _roiPoints.forEach(([x, y], i) => {
+      const px = x * w, py = y * h;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    if (_roiPoints.length >= 3) {
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.stroke();
+    // Draw vertex handles (larger so they're easy to grab)
+    _roiPoints.forEach(([x, y], i) => {
+      const px = x * w, py = y * h;
+      ctx.fillStyle = i === _roiDragIdx ? '#ff7700' : '#ffd400';
+      ctx.beginPath();
+      ctx.arc(px, py, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#000';
+      ctx.stroke();
+    });
+  }
+
+  async function saveRoiPolygon() {
+    const json = JSON.stringify(_roiPoints);
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roi_polygon: json }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert('Save failed: ' + JSON.stringify(err.detail));
+      return;
+    }
+    closeRoiModal();
+    refreshRoiStatus();
+  }
+
+  async function clearRoi() {
+    if (!confirm('Clear the region of interest? Detections will use the whole frame again.')) return;
+    await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roi_polygon: '' }),
+    });
+    refreshRoiStatus();
+  }
+
+  async function refreshRoiStatus() {
+    const d = await (await fetch('/api/settings')).json();
+    const raw = d.mutable.roi_polygon;
+    const el = document.getElementById('roi-status');
+    if (!raw) { el.textContent = 'No mask — full frame'; return; }
+    try {
+      const pts = JSON.parse(raw);
+      el.textContent = `Mask active: ${pts.length}-point polygon`;
+    } catch (e) { el.textContent = 'Mask: (unparseable)'; }
+  }
+
+  async function loadDetections(reset = false) {
+    if (reset) { offset = 0; document.getElementById('grid').innerHTML = ''; }
+    let url = `/api/detections?skip=${offset}&limit=${limit}`;
+    const dateFrom = document.getElementById('filter-from').value;
+    const dateTo = document.getElementById('filter-to').value;
+    const labelFilter = document.getElementById('filter-label').value;
+    if (dateFrom) url += `&date_from=${dateFrom}`;
+    if (dateTo) url += `&date_to=${dateTo}`;
+    if (labelFilter) url += `&label_filter=${labelFilter}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const grid = document.getElementById('grid');
+    if (data.length === 0 && offset === 0) {
+      grid.innerHTML = '<div class="empty">No detections yet — the service is watching 👀</div>';
+    }
+    data.forEach(d => { grid.innerHTML += cardHtml(d); });
+    offset += data.length;
+    document.getElementById('load-more').style.display = data.length < limit ? 'none' : 'block';
+  }
+
+  async function loadMore() {
+    await loadDetections(false);
+  }
+
+  async function label(id, lbl) {
+    // Missed Cat opens the bbox annotation modal instead of labeling directly
+    if (lbl === 'false_negative') {
+      openAnnotModal(id, `/api/detections/${id}/frame`);
+      return;
+    }
+    await fetch(`/api/detections/${id}/label`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: lbl }),
+    });
+    await loadDetections(true);
+    refreshStats();
+  }
+
+  async function deleteDetection(id) {
+    if (!confirm('Delete this detection? The frame file will be removed permanently.')) return;
+    await fetch(`/api/detections/${id}`, { method: 'DELETE' });
+    const card = document.getElementById(`card-${id}`);
+    if (card) card.remove();
+    refreshStats();
+  }
+
+  async function refreshStats() {
+    const res = await fetch('/api/training/status');
+    const s = await res.json();
+    document.getElementById('stat-tp').textContent = s.true_positives;
+    document.getElementById('stat-fp').textContent = s.false_positives;
+    document.getElementById('stat-fn').textContent = s.false_negatives;
+    document.getElementById('stat-ul').textContent = s.unlabeled;
+    document.getElementById('stat-train').textContent = s.status;
+  }
+
+  async function reportMissedCatLive() {
+    const btn = document.getElementById('btn-live-missed');
+    btn.disabled = true;
+    btn.textContent = 'Capturing...';
+    try {
+      const res = await fetch('/api/detections/report-missed', { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json();
+        alert('Failed: ' + (data.detail || 'unknown error'));
+        return;
+      }
+      const det = await res.json();
+      openAnnotModal(det.id, `/api/detections/${det.id}/frame`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Report Missed Cat';
+    }
+  }
+
+  // ---------- Webcam test panel (debug — verify detection on a known input) ----------
+  let _webcamStream = null;
+  let _webcamTimer = null;
+  let _webcamBusy = false;
+
+  async function toggleWebcamTest() {
+    const panel = document.getElementById('webcam-test-panel');
+    const btn = document.getElementById('btn-webcam-test');
+    if (_webcamStream) {
+      // Stop
+      clearInterval(_webcamTimer);
+      _webcamTimer = null;
+      _webcamStream.getTracks().forEach(t => t.stop());
+      _webcamStream = null;
+      panel.style.display = 'none';
+      btn.textContent = 'Test with my webcam';
+      btn.style.background = '#17a2b8';
+      return;
+    }
+    try {
+      _webcamStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+    } catch (err) {
+      alert('Webcam access denied or unavailable: ' + err.message);
+      return;
+    }
+    const video = document.getElementById('webcam-video');
+    video.srcObject = _webcamStream;
+    panel.style.display = 'block';
+    btn.textContent = 'Stop webcam test';
+    btn.style.background = '#dc3545';
+    _webcamTimer = setInterval(captureAndDetect, 1000);
+  }
+
+  async function captureAndDetect() {
+    if (_webcamBusy) return;  // skip frame if previous still running
+    const video = document.getElementById('webcam-video');
+    if (!video.videoWidth) return;
+    _webcamBusy = true;
+    try {
+      const canvas = document.getElementById('webcam-canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85));
+      const fd = new FormData();
+      fd.append('file', blob, 'frame.jpg');
+      const t0 = performance.now();
+      const res = await fetch('/api/test-detect', { method: 'POST', body: fd });
+      const elapsed = (performance.now() - t0).toFixed(0);
+      if (!res.ok) {
+        document.getElementById('webcam-result').textContent = 'Error: HTTP ' + res.status;
+        return;
+      }
+      const data = await res.json();
+      document.getElementById('webcam-annotated').src = 'data:image/jpeg;base64,' + data.annotated_jpeg_b64;
+      const parts = [
+        `cat=${data.cat_count}`,
+        `dog=${data.dog_count}`,
+        `human=${data.human_count}`,
+        `max_cat_conf=${data.max_cat_confidence.toFixed(3)}`,
+        `latency=${elapsed}ms`,
+      ];
+      document.getElementById('webcam-result').textContent = parts.join('  ·  ');
+    } catch (e) {
+      document.getElementById('webcam-result').textContent = 'Error: ' + e.message;
+    } finally {
+      _webcamBusy = false;
+    }
+  }
+
+  // ---------- Bbox annotation modal ----------
+  let _annotDetectionId = null;
+  let _annotBox = null;  // {x1, y1, x2, y2} in natural image coords
+  let _annotDragStart = null;
+
+  function openAnnotModal(detectionId, imgUrl) {
+    _annotDetectionId = detectionId;
+    _annotBox = null;
+    const img = document.getElementById('annot-image');
+    img.onload = () => {
+      const canvas = document.getElementById('annot-canvas');
+      canvas.width = img.clientWidth;
+      canvas.height = img.clientHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      document.getElementById('annot-submit').disabled = true;
+    };
+    // bust cache so we always show the current frame
+    img.src = imgUrl + '?t=' + Date.now();
+    document.getElementById('annot-modal').classList.add('open');
+  }
+
+  function closeAnnotModal() {
+    document.getElementById('annot-modal').classList.remove('open');
+    _annotDetectionId = null;
+    _annotBox = null;
+  }
+
+  function _canvasToImageCoords(cx, cy) {
+    const img = document.getElementById('annot-image');
+    const sx = img.naturalWidth / img.clientWidth;
+    const sy = img.naturalHeight / img.clientHeight;
+    return [cx * sx, cy * sy];
+  }
+
+  function _setupAnnotCanvas() {
+    const canvas = document.getElementById('annot-canvas');
+    const ctx = canvas.getContext('2d');
+    const getPos = (evt) => {
+      const rect = canvas.getBoundingClientRect();
+      return [evt.clientX - rect.left, evt.clientY - rect.top];
+    };
+    canvas.addEventListener('mousedown', (e) => {
+      _annotDragStart = getPos(e);
+    });
+    canvas.addEventListener('mousemove', (e) => {
+      if (!_annotDragStart) return;
+      const [x, y] = getPos(e);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 2;
+      const [sx, sy] = _annotDragStart;
+      ctx.strokeRect(Math.min(sx, x), Math.min(sy, y), Math.abs(x - sx), Math.abs(y - sy));
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      if (!_annotDragStart) return;
+      const [x, y] = getPos(e);
+      const [sx, sy] = _annotDragStart;
+      _annotDragStart = null;
+      if (Math.abs(x - sx) < 5 || Math.abs(y - sy) < 5) return;  // ignore tiny drags
+      const [ix1, iy1] = _canvasToImageCoords(Math.min(sx, x), Math.min(sy, y));
+      const [ix2, iy2] = _canvasToImageCoords(Math.max(sx, x), Math.max(sy, y));
+      _annotBox = [ix1, iy1, ix2, iy2];
+      document.getElementById('annot-submit').disabled = false;
+    });
+  }
+  _setupAnnotCanvas();
+
+  async function submitAnnotation() {
+    if (!_annotBox || _annotDetectionId == null) return;
+    const btn = document.getElementById('annot-submit');
+    btn.disabled = true;
+    const className = document.querySelector('input[name="annot-class"]:checked').value;
+    const res = await fetch(`/api/detections/${_annotDetectionId}/annotate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbox: _annotBox, class_name: className }),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      alert('Failed: ' + JSON.stringify(data.detail));
+      btn.disabled = false;
+      return;
+    }
+    closeAnnotModal();
+    await loadDetections(true);
+    refreshStats();
+  }
+
+  async function uploadImage(file) {
+    if (!file) return;
+    const btn = document.getElementById('btn-upload');
+    btn.disabled = true;
+    btn.textContent = 'Uploading...';
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/detections/upload', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const data = await res.json();
+        alert('Upload failed: ' + JSON.stringify(data.detail));
+        return;
+      }
+      const det = await res.json();
+      openAnnotModal(det.id, `/api/detections/${det.id}/frame`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Upload Image';
+      document.getElementById('upload-input').value = '';  // allow re-uploading same file
+    }
+  }
+
+  async function triggerTraining() {
+    const btn = document.getElementById('btn-train');
+    btn.disabled = true;
+    const res = await fetch('/api/training/trigger', { method: 'POST' });
+    const data = await res.json();
+    alert(`Training: ${data.status}`);
+    btn.disabled = false;
+    refreshStats();
+  }
+
+  function switchTab(tab) {
+    document.getElementById('history-view').style.display = tab === 'history' ? 'block' : 'none';
+    document.getElementById('live-view').style.display = tab === 'live' ? 'block' : 'none';
+    document.getElementById('recordings-view').style.display = tab === 'recordings' ? 'block' : 'none';
+    document.getElementById('settings-view').style.display = tab === 'settings' ? 'block' : 'none';
+    document.getElementById('tab-history').classList.toggle('active', tab === 'history');
+    document.getElementById('tab-live').classList.toggle('active', tab === 'live');
+    document.getElementById('tab-recordings').classList.toggle('active', tab === 'recordings');
+    document.getElementById('tab-settings').classList.toggle('active', tab === 'settings');
+
+    const liveImg = document.getElementById('live-stream');
+    if (tab === 'live') {
+      liveImg.src = '/api/stream';
+      document.getElementById('live-source').textContent = 'Connecting...';
+      liveImg.onload = function() { document.getElementById('live-source').textContent = 'Connected'; };
+      liveImg.onerror = function() { document.getElementById('live-source').textContent = 'Disconnected'; };
+    } else {
+      liveImg.src = '';
+    }
+
+    if (tab === 'recordings') loadRecordings();
+    if (tab === 'settings') loadSettings();
+  }
+
+  async function loadSettings() {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    renderMutable(data.mutable);
+    renderReadOnly(data.read_only);
+    updateCameraStatus(data.camera_status);
+    refreshRoiStatus();
+  }
+
+  function renderMutable(m) {
+    const container = document.getElementById('mutable-fields');
+    const secretFields = new Set(['webhook_secret', 'homeassistant_token']);
+    container.innerHTML = Object.entries(m).map(([k, v]) => {
+      let input;
+      if (typeof v === 'boolean') {
+        input = `<input type="checkbox" id="f-${k}" ${v ? 'checked' : ''} />`;
+      } else if (typeof v === 'number') {
+        input = `<input type="number" id="f-${k}" step="any" value="${v}" />`;
+      } else if (secretFields.has(k)) {
+        input = `<input type="password" id="f-${k}" value="${escapeHtml(v ?? '')}" autocomplete="new-password" />`;
+      } else {
+        input = `<input type="text" id="f-${k}" value="${escapeHtml(v ?? '')}" />`;
+      }
+      return `<div class="settings-row"><label>${k}</label>${input}</div>`;
+    }).join('');
+  }
+
+  function renderReadOnly(r) {
+    const container = document.getElementById('readonly-fields');
+    container.innerHTML = Object.entries(r).map(([k, v]) =>
+      `<div class="settings-row"><label>${k}</label><div class="readonly-value">${escapeHtml(String(v))}</div></div>`
+    ).join('');
+  }
+
+  function updateCameraStatus(status) {
+    const pill = document.getElementById('camera-status-pill');
+    pill.textContent = 'Camera: ' + status;
+    pill.className = 'status-pill status-' + status;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+  }
+
+  async function saveSettings() {
+    const btn = document.getElementById('btn-save-settings');
+    const feedback = document.getElementById('settings-feedback');
+    btn.disabled = true;
+    feedback.textContent = 'Saving...';
+    feedback.className = '';
+
+    const current = await (await fetch('/api/settings')).json();
+    const updates = {};
+    for (const key of Object.keys(current.mutable)) {
+      const el = document.getElementById('f-' + key);
+      if (!el) continue;
+      if (el.type === 'checkbox') updates[key] = el.checked;
+      else if (el.type === 'number') updates[key] = parseFloat(el.value);
+      else updates[key] = el.value;
+    }
+
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates),
+    });
+    btn.disabled = false;
+    if (res.ok) {
+      feedback.textContent = 'Saved';
+      feedback.className = 'ok';
+    } else {
+      const err = await res.json();
+      feedback.textContent = 'Error: ' + JSON.stringify(err.detail);
+      feedback.className = 'err';
+    }
+  }
+
+  async function testSprinkler() {
+    const btn = document.getElementById('btn-test-sprinkler');
+    const feedback = document.getElementById('test-sprinkler-feedback');
+    btn.disabled = true;
+    feedback.textContent = 'Firing real-trigger path (open → wait → close)...';
+    feedback.className = '';
+    try {
+      const res = await fetch('/api/settings/test-sprinkler', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        feedback.textContent = `✓ Sprinkler test OK (open + close confirmed, duration ${data.duration_seconds}s)`;
+        feedback.className = 'ok';
+      } else {
+        const where = data.stage ? ` [${data.stage}]` : '';
+        feedback.textContent = `✗${where} ${data.error || JSON.stringify(data)}`;
+        feedback.className = 'err';
+      }
+    } catch (e) {
+      feedback.textContent = '✗ ' + e.message;
+      feedback.className = 'err';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function restartService() {
+    if (!confirm('Restart the service? Requires a supervisor (systemd etc.) for actual restart — otherwise it will just stop.')) return;
+    await fetch('/api/settings/restart', { method: 'POST' });
+    alert('Restart signal sent. The UI will be unavailable briefly.');
+  }
+
+  async function loadRecordings() {
+    const res = await fetch('/api/recordings?limit=50');
+    const data = await res.json();
+    const grid = document.getElementById('recordings-grid');
+    if (data.length === 0) {
+      grid.innerHTML = '<div class="empty">No sprinkler events yet 🚿</div>';
+      return;
+    }
+    grid.innerHTML = data.map(r => {
+      const size = (r.file_size_bytes / 1024 / 1024).toFixed(1);
+      return `
+        <div class="rec-card" id="rec-${r.id}">
+          <video controls preload="metadata" src="/api/recordings/${r.id}/video"></video>
+          <div class="rec-card-meta">
+            <span>${formatDate(r.created_at)} · ${r.duration_seconds.toFixed(1)}s · ${size} MB</span>
+            <button class="rec-delete" onclick="deleteRecording(${r.id})">Delete</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteRecording(id) {
+    if (!confirm('Delete this recording?')) return;
+    await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
+    document.getElementById(`rec-${id}`).remove();
+  }
+
+  function applyFilter() { loadDetections(true); }
+  function clearFilter() {
+    document.getElementById('filter-from').value = '';
+    document.getElementById('filter-to').value = '';
+    document.getElementById('filter-label').value = 'unlabeled';
+    loadDetections(true);
+  }
+
+  loadDetections(true);
+  refreshStats();
+  setInterval(refreshStats, 10000);
+  setInterval(() => loadDetections(true), 30000);
+</script>
+</body>
+</html>
