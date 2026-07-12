@@ -56,6 +56,6 @@ EXPOSE 8000
 # that restart: unless-stopped doesn't catch because the process didn't
 # actually exit. willfarrell/autoheal in compose restarts on unhealthy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/', timeout=8); sys.exit(0)" || exit 1
+    CMD python -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/healthz', timeout=8); sys.exit(0)" || exit 1
 
 CMD ["python", "-m", "cat_detector.main"]

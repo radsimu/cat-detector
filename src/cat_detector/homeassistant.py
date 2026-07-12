@@ -37,7 +37,9 @@ def _base() -> str:
 
 
 async def set_switch(state: str) -> bool:
-    """Open ('on') or close ('off') the configured valve via HA. Kept named
+    """Open ('on') or close ('off') the configured entity via HA. Dispatches
+    by entity domain: a `valve.*` entity gets valve.open_valve/close_valve;
+    a `switch.*` entity gets switch.turn_on/turn_off. Kept named
     `set_switch` for parity with the old smartthings module so callers in
     camera.py don't need to change."""
     if not is_configured():
@@ -45,19 +47,39 @@ async def set_switch(state: str) -> bool:
     if state not in ("on", "off"):
         raise ValueError(f"state must be 'on' or 'off', got {state!r}")
 
-    service = "open_valve" if state == "on" else "close_valve"
-    url = f"{_base()}/api/services/valve/{service}"
-    body = {"entity_id": settings.homeassistant_valve_entity}
+    entity = settings.homeassistant_valve_entity
+    domain = entity.split(".", 1)[0] if "." in entity else "valve"
+    if domain == "valve":
+        service = "open_valve" if state == "on" else "close_valve"
+        url = f"{_base()}/api/services/valve/{service}"
+    elif domain == "switch":
+        service = "turn_on" if state == "on" else "turn_off"
+        url = f"{_base()}/api/services/switch/{service}"
+    else:
+        logger.error("HA: unsupported entity domain %r for %s", domain, entity)
+        return False
+    body = {"entity_id": entity}
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json=body, headers=_headers())
         resp.raise_for_status()
-        logger.info("HA: valve.%s sent to %s", service, settings.homeassistant_valve_entity)
+        logger.info("HA: %s.%s sent to %s", domain, service, entity)
         return True
     except httpx.HTTPError as exc:
-        logger.error("HA valve.%s failed: %s", service, exc)
+        logger.error("HA %s.%s failed: %s", domain, service, exc)
         return False
+
+
+def is_open_state(s: str | None) -> bool:
+    """Normalize valve/switch open semantics: valves report 'open', switches
+    report 'on'. Either counts as 'currently delivering water'."""
+    return s in ("open", "on")
+
+
+def is_closed_state(s: str | None) -> bool:
+    """Normalize valve/switch closed semantics: 'closed' or 'off'."""
+    return s in ("closed", "off")
 
 
 async def get_valve_state() -> str | None:

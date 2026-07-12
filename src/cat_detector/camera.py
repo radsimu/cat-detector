@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _last_webhook_time: datetime | None = None
 _consecutive_triggers: int = 0  # frames in a row with a qualifying detection
+_miss_streak: int = 0  # consecutive frames with no animal — used to debounce
+                       # the consecutive-frame gate so a flickering detector
+                       # doesn't keep resetting the streak to zero.
+_MISS_TOLERANCE = 2    # forgive this many "no animal" frames before reset
 
 # Sprinkler-trigger rate-limit alerting. If we fire too many times in a short
 # window, something is wrong (loop / sensor / false-positive cluster). Alert
@@ -56,9 +60,22 @@ _capture_lock = threading.Lock()
 # Camera status for UI indicator. Updated by the camera loop.
 camera_status: str = "unknown"  # "connected" | "disconnected" | "retrying"
 
+# Detection-loop heartbeat — updated each time _process_frame completes.
+# /healthz reads this to verify the detection coroutine is actually running,
+# not just that uvicorn answers HTTP.
+_last_process_ts: float = 0.0
+
 
 def get_camera_status() -> str:
     return camera_status
+
+
+def get_last_process_age() -> float | None:
+    """Seconds since the detection loop last finished _process_frame.
+    None if it has never run (just booted)."""
+    if _last_process_ts == 0.0:
+        return None
+    return time.time() - _last_process_ts
 
 
 def _get_capture() -> cv2.VideoCapture | None:
@@ -166,26 +183,36 @@ def _serialize_boxes(boxes: list) -> str | None:
 
 
 async def _process_frame(frame: np.ndarray) -> None:
-    global _last_webhook_time, _consecutive_triggers
+    global _last_webhook_time, _consecutive_triggers, _last_process_ts
 
     # YOLOv8x on Pi-class CPU takes seconds — must run off the event loop or
     # the MJPEG stream and HTTP handlers freeze for the duration.
     result = await asyncio.get_event_loop().run_in_executor(None, detect, frame)
+    _last_process_ts = time.time()
 
     # Publish boxes to the shared overlay cache so the live stream and the
     # recording buffer can draw them without running a second YOLO pass.
     from cat_detector.routers.stream import publish_boxes
     publish_boxes(result.boxes)
 
+    global _miss_streak
     animal_count = result.cat_count + result.dog_count
     if animal_count == 0 and result.human_count == 0:
-        # Nothing detected — reset counter and don't store
-        _consecutive_triggers = 0
+        # No animal AND no human → debounce. A flickering detector loses the
+        # cat for 1-2 frames; resetting the streak there means we never reach
+        # consecutive_min on marginal subjects.
+        _miss_streak += 1
+        if _miss_streak > _MISS_TOLERANCE:
+            _consecutive_triggers = 0
         return
     if animal_count == 0 and not settings.save_human_only_frames:
-        # Human-only frame. Human presence also breaks a consecutive run.
+        # Human present — hard reset (human guard is non-negotiable, no
+        # debounce). Also clears miss streak so any later cat starts fresh.
         _consecutive_triggers = 0
+        _miss_streak = 0
         return
+    # Animal seen — clear miss debounce.
+    _miss_streak = 0
 
     trigger, skip_reason = should_trigger_webhook(result)
 
@@ -257,16 +284,42 @@ async def _process_frame(frame: np.ndarray) -> None:
 
     if trigger:
         # Start recording immediately so the pre-roll snapshot captures the
-        # trigger moment. Valve open runs concurrently — waiting for it first
-        # would push the pre-roll window past the wetting moment.
+        # trigger moment.
         from cat_detector.recording import trigger_recording
         asyncio.create_task(trigger_recording(detection_id))
-        success = await _open_sprinkler_with_retry(detection_id, result)
-        if success:
-            _last_webhook_time = datetime.utcnow()
-            _consecutive_triggers = 0
-            asyncio.create_task(_delayed_sprinkler_off(detection_id))
-            await _check_trigger_rate()
+
+        # Fire-and-forget open + dwell + close (same pattern as the test
+        # path). Awaiting _open_sprinkler_with_retry blocked _process_frame
+        # for up to 30s of cloud-confirm retries, by which time the
+        # post-roll had ended without ever seeing the sprinkle.
+        _last_webhook_time = datetime.utcnow()
+        _consecutive_triggers = 0
+        asyncio.create_task(_fire_sprinkler_cycle(detection_id, result))
+        await _check_trigger_rate()
+
+
+async def _fire_sprinkler_cycle(detection_id: int, result) -> None:
+    """Production sprinkler cycle: send open, dwell, send close, plus three
+    safety closes 1s apart. Verification happens in background via the
+    valve_watchdog_loop; we don't block here on per-command state polling
+    because awaiting the cloud round-trip pushes the sprinkle past the
+    recording's post-roll window."""
+    try:
+        await _open_sprinkler(detection_id, result)
+    except Exception:
+        logger.exception("Open call raised for detection %d", detection_id)
+    await asyncio.sleep(settings.sprinkler_duration_seconds)
+    try:
+        await _close_sprinkler(detection_id)
+    except Exception:
+        logger.exception("Close call raised for detection %d", detection_id)
+    # Belt-and-braces redundant closes
+    for _ in range(3):
+        await asyncio.sleep(1.0)
+        try:
+            await _close_sprinkler(detection_id)
+        except Exception:
+            pass
 
 
 async def _check_trigger_rate() -> None:
@@ -331,7 +384,7 @@ async def _open_sprinkler_with_retry(detection_id: int, result, attempts: int = 
                 continue
             last_state = info.get("state")
             last_reported = info.get("last_reported") or info.get("last_updated")
-            if last_state == "open" and last_reported != baseline_reported:
+            if homeassistant.is_open_state(last_state) and last_reported != baseline_reported:
                 if attempt > 1:
                     logger.info("Valve open confirmed on attempt %d", attempt)
                 return True
@@ -398,7 +451,7 @@ async def _close_sprinkler_with_retry(detection_id: int, attempts: int = 4) -> b
                 continue
             last_state = info.get("state")
             last_reported = info.get("last_reported") or info.get("last_updated")
-            if last_state == "closed" and last_reported != baseline_reported:
+            if homeassistant.is_closed_state(last_state) and last_reported != baseline_reported:
                 if attempt > 1:
                     logger.info("Valve close confirmed on attempt %d", attempt)
                 return True
@@ -468,7 +521,7 @@ async def valve_watchdog_loop() -> None:
             else:
                 unavailable_since = None
 
-            if state != "open":
+            if not homeassistant.is_open_state(state):
                 open_since = None
                 continue
 
@@ -558,23 +611,42 @@ async def fire_test_trigger() -> AsyncGenerator[dict, None]:
     yield {"event": "log",
            "message": f"Baseline state={info0.get('state')}, last_changed={baseline_changed}"}
 
+    # True fire-and-forget: launch the HA service calls as background tasks
+    # instead of awaiting them. HA service POSTs block ~3s waiting for the
+    # cloud chain to ack — awaiting them would make the actual command gap
+    # = dwell + ~6s, not the configured dwell. Letting them run in parallel
+    # collapses real water-on time to (open processing latency) + dwell.
     open_send_t = time.monotonic()
-    yield {"event": "log", "message": "Sending valve.open_valve (no wait)..."}
-    try:
-        await _open_sprinkler(0, None)
-    except Exception as exc:
-        yield {"event": "log", "message": f"Open call raised: {exc}"}
+    yield {"event": "log", "message": "Sending valve.open_valve (fire-and-forget)..."}
+    open_task = asyncio.create_task(_open_sprinkler(0, None))
 
     dwell_s = settings.sprinkler_duration_seconds
     yield {"event": "log", "message": f"Dwell — {int(dwell_s * 1000)} ms..."}
     await asyncio.sleep(dwell_s)
 
     close_send_t = time.monotonic()
-    yield {"event": "log", "message": "Sending valve.close_valve (no wait)..."}
-    try:
-        await _close_sprinkler(0)
-    except Exception as exc:
-        yield {"event": "log", "message": f"Close call raised: {exc}"}
+    yield {"event": "log", "message": "Sending valve.close_valve (fire-and-forget)..."}
+    close_task = asyncio.create_task(_close_sprinkler(0))
+
+    # Belt-and-braces: schedule extra close attempts 1s, 2s, 3s after the
+    # first one. eWeLink cloud occasionally drops a command; redundant
+    # closes are idempotent on the device side but maximize the chance of
+    # actually closing the valve. Each is fire-and-forget — none of them
+    # block the verification loop.
+    async def _safety_closes() -> None:
+        for delay in (1.0, 2.0, 3.0):
+            await asyncio.sleep(1.0)  # 1s spacing between each
+            try:
+                await _close_sprinkler(0)
+            except Exception:
+                logger.warning("safety close fired at +%.0fs raised", delay, exc_info=True)
+    safety_task = asyncio.create_task(_safety_closes())
+
+    # Surface any exceptions on the immediate calls, but don't block here —
+    # tasks run in parallel; we move on to state verification immediately.
+    for t in (open_task, close_task, safety_task):
+        t.add_done_callback(lambda f: f.exception() and
+                            logger.warning("sprinkler call task error: %s", f.exception()))
 
     command_gap_ms = int((close_send_t - open_send_t) * 1000)
     yield {"event": "log",
@@ -596,7 +668,7 @@ async def fire_test_trigger() -> AsyncGenerator[dict, None]:
         last_state = info.get("state")
         last_changed = info.get("last_changed")
         last_reported = info.get("last_reported") or info.get("last_updated")
-        if last_state == "closed" and last_changed != baseline_changed:
+        if homeassistant.is_closed_state(last_state) and last_changed != baseline_changed:
             yield {"event": "log",
                    "message": f"✓ Cycle confirmed — state=closed, last_changed={last_changed} (advanced)"}
             yield {"event": "done", "ok": True, "sprinkle_ms": command_gap_ms,
