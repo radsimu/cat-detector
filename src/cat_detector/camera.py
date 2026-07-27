@@ -105,6 +105,21 @@ def get_last_process_age() -> float | None:
     return time.time() - _last_process_ts
 
 
+def _redacted_camera_url() -> str:
+    """Camera URL safe for logs/notifications: masks the password in an
+    rtsp://user:pass@host URL so credentials never land in logs or on the
+    phone. Non-URL sources (e.g. a device index) are returned unchanged."""
+    url = settings.camera_url
+    if not isinstance(url, str) or "://" not in url or "@" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    creds, host = rest.split("@", 1)
+    if ":" in creds:
+        user, _ = creds.split(":", 1)
+        creds = f"{user}:***"
+    return f"{scheme}://{creds}@{host}"
+
+
 def _get_capture() -> cv2.VideoCapture | None:
     """Get or create a persistent camera capture. Caller must hold _capture_lock."""
     global _capture
@@ -129,14 +144,14 @@ def _get_capture() -> cv2.VideoCapture | None:
 
     _capture = cv2.VideoCapture(source, cv2.CAP_FFMPEG if is_rtsp else cv2.CAP_ANY)
     if not _capture.isOpened():
-        logger.error("Cannot open camera source: %s", settings.camera_url)
+        logger.error("Cannot open camera source: %s", _redacted_camera_url())
         _capture = None
         return None
 
     # Shrink the internal buffer to 1 frame so cap.read() always returns the latest
     _capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    logger.info("Camera opened: %s (rtsp=%s)", settings.camera_url, is_rtsp)
+    logger.info("Camera opened: %s (rtsp=%s)", _redacted_camera_url(), is_rtsp)
     return _capture
 
 
@@ -802,7 +817,7 @@ async def run_camera_loop() -> None:
     """Main loop — runs indefinitely, sampling a frame every interval."""
     logger.info(
         "Camera loop started (source=%s, interval=%ds)",
-        settings.camera_url,
+        _redacted_camera_url(),
         settings.detection_interval_seconds,
     )
 
@@ -833,7 +848,7 @@ async def run_camera_loop() -> None:
                         _camera_was_offline = True
                         await homeassistant.notify(
                             f"Camera offline — {consecutive_failures} consecutive frame grabs failed. "
-                            f"Source: {settings.camera_url}",
+                            f"Source: {_redacted_camera_url()}",
                             title="Cat detector: camera offline",
                         )
                 delay = min(
