@@ -15,6 +15,8 @@ from cat_detector.camera import (
     get_last_process_age,
     reconcile_valve_on_startup,
     run_camera_loop,
+    start_camera_reader,
+    stop_camera_reader,
     valve_watchdog_loop,
     _release_capture,
 )
@@ -42,6 +44,9 @@ async def lifespan(app: FastAPI):
         await reconcile_valve_on_startup()
     except Exception:
         logger.exception("Valve reconcile on startup failed — continuing")
+    # Start the camera reader thread FIRST so the shared frame slot is being
+    # filled before the detection loop and recording buffer start sampling it.
+    start_camera_reader()
     task = asyncio.create_task(run_camera_loop())
     watchdog = asyncio.create_task(valve_watchdog_loop())
     start_buffer()
@@ -54,6 +59,7 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+    stop_camera_reader()
     _release_capture()
     logger.info("Cat detector service stopped")
 

@@ -65,6 +65,33 @@ camera_status: str = "unknown"  # "connected" | "disconnected" | "retrying"
 # not just that uvicorn answers HTTP.
 _last_process_ts: float = 0.0
 
+# ---- Shared latest-frame slot, filled by the camera reader thread --------
+# A single reader thread owns the device and continuously grabs frames at the
+# stream's NATIVE rate, so the FFmpeg/RTSP demux buffer never backs up. All
+# consumers (detection loop, recording buffer, live stream) read the newest
+# decoded frame from this slot instead of calling cap.read() themselves.
+#
+# Why: consumers that read slower than the camera produces (the 10fps buffer
+# loop, the 0.5fps detection loop) let the demux buffer accumulate, so the
+# frames they pulled fell progressively behind real time — tens of seconds to
+# minutes of latency that grew until the stream reconnected. Draining in one
+# always-current reader eliminates that entirely.
+_latest_frame: np.ndarray | None = None
+_latest_frame_ts: float = 0.0
+_frame_slot_lock = threading.Lock()
+_reader_thread: threading.Thread | None = None
+_reader_stop = threading.Event()
+
+# A slot older than this is treated as "no frame" — the reader has stalled
+# (frozen/hung stream) and consumers should back off rather than record or
+# detect on a frame that is seconds stale.
+_FRAME_STALE_SECONDS = 5.0
+# Decode at most this often. grab() still runs every loop at the native rate
+# to keep the demux buffer drained (near-zero latency); retrieve() (the
+# expensive decode) is throttled to cap CPU while staying above the 10fps the
+# recording buffer samples at.
+_DECODE_INTERVAL = 0.08
+
 
 def get_camera_status() -> str:
     return camera_status
@@ -124,39 +151,25 @@ def _release_capture() -> None:
 
 
 def _grab_frame() -> np.ndarray | None:
-    """Grab a single frame, serialized through a lock so concurrent
-    consumers (camera loop, stream, report-missed) never race on cap.read()."""
-    with _capture_lock:
-        cap = _get_capture()
-        if cap is None:
+    """Return the most recent decoded frame published by the camera reader
+    thread, or None if the slot is empty or stale (reader stalled / camera
+    down). The reader keeps the slot at real time, so callers never receive a
+    backlogged frame. Returns the shared array directly — the reader allocates
+    a fresh array per decode and never mutates a published one, and consumers
+    copy before drawing, so no defensive copy is needed here."""
+    with _frame_slot_lock:
+        if _latest_frame is None:
             return None
-        ret, frame = cap.read()
-        if not ret:
-            _capture_release_inner()
+        if time.time() - _latest_frame_ts > _FRAME_STALE_SECONDS:
             return None
-        return frame
+        return _latest_frame
 
 
 def _grab_latest_frame() -> np.ndarray | None:
-    """Like _grab_frame, but drains any buffered frames first so the returned
-    frame is as close to 'now' as possible. Used by the live stream to skip
-    backlogged frames when encoding falls behind."""
-    with _capture_lock:
-        cap = _get_capture()
-        if cap is None:
-            return None
-        # Flush up to a few buffered frames (grab is fast — decode skipped)
-        for _ in range(5):
-            if not cap.grab():
-                break
-        ret, frame = cap.retrieve()
-        if not ret:
-            # fall back to regular read
-            ret, frame = cap.read()
-        if not ret:
-            _capture_release_inner()
-            return None
-        return frame
+    """Alias for _grab_frame. The reader thread already keeps only the newest
+    frame in the slot, so 'latest' and 'current' are the same thing now — the
+    old per-call drain-5-frames trick is obsolete."""
+    return _grab_frame()
 
 
 def _capture_release_inner() -> None:
@@ -166,6 +179,82 @@ def _capture_release_inner() -> None:
         _capture.release()
         _capture = None
         logger.warning("Camera disconnected — will retry on next grab")
+
+
+def _camera_reader_loop() -> None:
+    """Single owner of the camera device. Grabs frames at the stream's native
+    rate so the FFmpeg/RTSP demux buffer never backs up (the root cause of
+    multi-second capture latency), decoding at most every _DECODE_INTERVAL and
+    publishing the newest decoded frame to the shared slot. Consumers read the
+    slot via _grab_frame; none of them touch the device, so none can fall
+    behind real time.
+
+    Owns camera_status. grab()/retrieve() run under _capture_lock so a
+    shutdown-time _release_capture can't free the capture mid-call (which can
+    segfault the FFmpeg backend)."""
+    global camera_status, _latest_frame, _latest_frame_ts
+    consecutive_failures = 0
+    last_decode = 0.0
+    while not _reader_stop.is_set():
+        try:
+            with _capture_lock:
+                cap = _get_capture()
+                if cap is None:
+                    _cap_fail = True
+                else:
+                    _cap_fail = not cap.grab()
+                    if _cap_fail:
+                        _capture_release_inner()
+            if _cap_fail:
+                consecutive_failures += 1
+                camera_status = "retrying" if consecutive_failures < 5 else "disconnected"
+                # Exponential backoff on reconnect, capped.
+                _reader_stop.wait(min(
+                    settings.camera_reconnect_max_delay,
+                    0.5 * (2 ** min(consecutive_failures, 6)),
+                ))
+                continue
+
+            now = time.time()
+            if now - last_decode >= _DECODE_INTERVAL:
+                with _capture_lock:
+                    if _capture is None:
+                        continue
+                    ret, frame = _capture.retrieve()
+                if ret and frame is not None:
+                    with _frame_slot_lock:
+                        _latest_frame = frame
+                        _latest_frame_ts = now
+                    last_decode = now
+
+            consecutive_failures = 0
+            camera_status = "connected"
+        except Exception:
+            logger.exception("Camera reader loop error — reopening capture")
+            _release_capture()
+            camera_status = "retrying"
+            _reader_stop.wait(0.5)
+
+
+def start_camera_reader() -> None:
+    """Start the background camera reader thread (idempotent)."""
+    global _reader_thread
+    if _reader_thread is None or not _reader_thread.is_alive():
+        _reader_stop.clear()
+        _reader_thread = threading.Thread(
+            target=_camera_reader_loop, name="camera-reader", daemon=True
+        )
+        _reader_thread.start()
+        logger.info("Camera reader thread started (native-rate grab, decode<=%.0ffps)",
+                    1.0 / _DECODE_INTERVAL)
+
+
+def stop_camera_reader() -> None:
+    """Signal the reader thread to stop and wait briefly for it to exit."""
+    _reader_stop.set()
+    t = _reader_thread
+    if t is not None:
+        t.join(timeout=3.0)
 
 
 _MAX_DETECTIONS_JSON_BYTES = 32_768  # 32KB — generous cap for ~100 boxes
@@ -724,7 +813,7 @@ async def run_camera_loop() -> None:
         try:
             frame = await asyncio.get_event_loop().run_in_executor(None, _grab_frame)
             if frame is not None:
-                camera_status = "connected"
+                # camera_status is owned by the reader thread now.
                 if _camera_was_offline:
                     _camera_was_offline = False
                     await homeassistant.notify(
@@ -735,8 +824,8 @@ async def run_camera_loop() -> None:
                 await _process_frame(frame)
                 await asyncio.sleep(settings.detection_interval_seconds)
             else:
+                # No fresh frame in the slot — reader stalled or camera down.
                 consecutive_failures += 1
-                camera_status = "retrying" if consecutive_failures < 5 else "disconnected"
                 if consecutive_failures == _CAMERA_OFFLINE_FAILURES:
                     now = time.time()
                     if now - _last_camera_alert_at > _CAMERA_OFFLINE_COOLDOWN_S:
