@@ -798,6 +798,17 @@ async def reconcile_valve_on_startup() -> None:
     redundant close as a no-op."""
     if not (homeassistant.is_configured() or settings.webhook_off_url):
         return
+    # A device that is already closed doesn't push a new report on a
+    # redundant close, so the confirmed-close path would raise a false
+    # "stuck open" alert on every boot. Trust an already-closed state.
+    info = await homeassistant.get_valve_state_info() if homeassistant.is_configured() else None
+    if info is not None and homeassistant.is_closed_state(info.get("state")):
+        logger.info("Valve already closed on startup — sending best-effort close, no confirm")
+        try:
+            await _close_sprinkler(detection_id=0)
+        except Exception:
+            logger.exception("Best-effort close on startup raised")
+        return
     logger.info("Reconciling valve state on startup — sending close")
     await _close_sprinkler_with_retry(detection_id=0, attempts=2)
 
